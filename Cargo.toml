@@ -1,0 +1,9 @@
+[workspace.package]
+edition = "2024"
+
+[package]
+name = "capsule"
+edition.workspace = true
+
+[dependencies]
+macros = { path = "macros" }

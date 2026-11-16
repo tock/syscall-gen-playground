@@ -1,0 +1,6 @@
+[package]
+name = "macros"
+edition.workspace = true
+
+[lib]
+proc-macro = true
