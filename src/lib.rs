@@ -122,8 +122,19 @@ mod tests {
     }
 
     #[test]
-    fn upcall_const_was_generated() {
-        assert_eq!(UPCALL_CHANGED, 0);
+    fn upcall_consts_were_generated() {
+        assert_eq!(subscribe::UPCALL_CHANGED, 0);
+        assert_eq!(subscribe::COUNT, 1);
+    }
+
+    #[test]
+    fn schedule_helper_is_typed_and_works() {
+        let c = counter();
+        let scheduled = c
+            .apps
+            .enter(ProcessId, |_, upcalls| subscribe::schedule_changed(upcalls, 7))
+            .unwrap();
+        assert!(scheduled.is_ok());
     }
 }
 
@@ -132,8 +143,8 @@ mod tests {
 /// `SyscallDriver` for it -- not just for the simplified `Counter` above.
 #[cfg(test)]
 mod button_tests {
-    use super::button::{App, Button, UPCALL_TOGGLED};
-    use kernel::grant::Grant;
+    use super::button::{subscribe, App, Button};
+    use kernel::grant::{AllowRoCount, AllowRwCount, Grant, UpcallCount};
     use kernel::hil::gpio::{
         ActivationMode, ActivationState, Configure, FloatingState, Input, InterruptEdge,
         InterruptValueWrapper, InterruptWithValue,
@@ -218,7 +229,21 @@ mod button_tests {
     }
 
     #[test]
-    fn upcall_const_was_generated() {
-        assert_eq!(UPCALL_TOGGLED, 0);
+    fn upcall_consts_were_generated() {
+        assert_eq!(subscribe::UPCALL_TOGGLED, 0);
+        assert_eq!(subscribe::COUNT, 1);
+    }
+
+    #[test]
+    fn schedule_toggled_helper_is_typed_and_works() {
+        // `fired` (hand-written, below the macros) already calls this
+        // helper on a real interrupt; this just checks it's callable
+        // directly with the variant's own named, typed arguments, without
+        // needing `Button`'s own (private) grant.
+        let grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>> =
+            Grant::new(App::default());
+        grant.each(|_, _, upcalls| {
+            assert!(subscribe::schedule_toggled(upcalls, 0, true).is_ok());
+        });
     }
 }

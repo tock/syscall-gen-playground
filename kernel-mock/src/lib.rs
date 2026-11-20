@@ -27,6 +27,15 @@ impl From<process::Error> for ErrorCode {
     }
 }
 
+pub mod upcall {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum UpcallError {
+        InvalidSubscribeNum,
+        QueueFull,
+        KernelError,
+    }
+}
+
 pub mod syscall {
     use super::ErrorCode;
 
@@ -106,14 +115,22 @@ pub mod grant {
 
     /// Stands in for the real per-app upcall handle passed into
     /// `Grant::enter`/`Grant::each`.
-    pub struct Upcalls;
+    pub struct GrantKernelData<'a> {
+        _marker: PhantomData<&'a ()>,
+    }
 
-    impl Upcalls {
+    impl<'a> GrantKernelData<'a> {
+        fn new() -> Self {
+            GrantKernelData {
+                _marker: PhantomData,
+            }
+        }
+
         pub fn schedule_upcall(
             &self,
-            _which: usize,
-            _args: (usize, usize, usize),
-        ) -> Result<(), super::ErrorCode> {
+            _subscribe_num: usize,
+            _r: (usize, usize, usize),
+        ) -> Result<(), super::upcall::UpcallError> {
             Ok(())
         }
     }
@@ -137,16 +154,20 @@ pub mod grant {
 
         pub fn enter<F, T>(&self, _processid: super::ProcessId, f: F) -> Result<T, super::process::Error>
         where
-            F: FnOnce(&mut A, &mut Upcalls) -> T,
+            F: FnOnce(&mut A, &GrantKernelData<'_>) -> T,
         {
-            Ok(f(&mut self.app.borrow_mut(), &mut Upcalls))
+            Ok(f(&mut self.app.borrow_mut(), &GrantKernelData::new()))
         }
 
         pub fn each<F>(&self, mut f: F)
         where
-            F: FnMut(super::ProcessId, &mut A, &mut Upcalls),
+            F: FnMut(super::ProcessId, &mut A, &GrantKernelData<'_>),
         {
-            f(super::ProcessId, &mut self.app.borrow_mut(), &mut Upcalls);
+            f(
+                super::ProcessId,
+                &mut self.app.borrow_mut(),
+                &GrantKernelData::new(),
+            );
         }
     }
 }

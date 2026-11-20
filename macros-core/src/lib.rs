@@ -347,8 +347,71 @@ pub fn build_syscall(args: SyscallArgs, mut impl_block: ItemImpl) -> syn::Result
 /// `#[subscribe]`'s full output: one `UPCALL_<NAME>: usize` constant per
 /// variant. The enum itself (a declarative DSL -- see `syscall_drivers`)
 /// is never emitted, only parsed.
+/// The doc-comment lines on an item, in order, each still carrying the
+/// single leading space `///` leaves (`#[doc = " text"]`) so re-emitting
+/// them as `#[doc = #line]` round-trips through `rustfmt`/`prettyplease`
+/// looking exactly like a normal `/// text` comment.
+fn doc_lines(attrs: &[Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .filter_map(|a| match &a.meta {
+            syn::Meta::NameValue(nv) => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) => Some(s.value()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// `Toggled` -> `toggled`, `PinChanged` -> `pin_changed`.
+fn pascal_to_snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn named_fields(variant: &syn::Variant) -> syn::Result<Vec<(&Ident, &Type)>> {
+    match &variant.fields {
+        syn::Fields::Named(fields) => Ok(fields
+            .named
+            .iter()
+            .map(|f| (f.ident.as_ref().expect("named field"), &f.ty))
+            .collect()),
+        syn::Fields::Unit => Ok(Vec::new()),
+        syn::Fields::Unnamed(_) => Err(syn::Error::new(
+            variant.span(),
+            "subscribe variants must use named fields (or none), not tuple fields, \
+             so each upcall argument can be documented by name",
+        )),
+    }
+}
+
+/// `#[subscribe]`'s full output: a `pub mod subscribe` holding one
+/// `UPCALL_<NAME>: usize` constant per variant (each documented with the
+/// variant's own doc comment plus its upcall signature), a `COUNT` of how
+/// many there are, and a `schedule_<name>` helper per variant that packs its
+/// named, typed arguments into the `(usize, usize, usize)` triple
+/// `GrantKernelData::schedule_upcall` expects -- so callers get type
+/// checking on upcall arguments instead of having to get the packing right
+/// by hand. The enum itself (a declarative DSL -- see `syscall_drivers`) is
+/// never emitted, only parsed.
 pub fn build_subscribe(item: &ItemEnum) -> syn::Result<TokenStream> {
     let mut consts = Vec::new();
+    let mut fns = Vec::new();
     let mut seen: BTreeMap<usize, Ident> = BTreeMap::new();
 
     for variant in &item.variants {
@@ -377,12 +440,74 @@ pub fn build_subscribe(item: &ItemEnum) -> syn::Result<TokenStream> {
             ));
         }
 
+        let fields = named_fields(variant)?;
+        if fields.len() > 3 {
+            return Err(syn::Error::new(
+                variant.span(),
+                "an upcall can carry at most 3 arguments -- TRD104 only gives it \
+                 three usize-sized words to pack them into",
+            ));
+        }
+
         let const_name = format_ident!("UPCALL_{}", variant.ident.to_string().to_uppercase());
         let num_lit = Literal::usize_unsuffixed(num);
+
+        let signature = format!(
+            "fn({})",
+            fields
+                .iter()
+                .map(|(name, ty)| format!("{name}: {}", quote!(#ty)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut doc = doc_lines(&variant.attrs);
+        if !doc.is_empty() {
+            doc.push(String::new());
+        }
+        doc.push(format!(" Upcall signature: `{signature}`"));
+        let doc_attrs = doc.iter().map(|line| quote! { #[doc = #line] });
+
         consts.push(quote! {
+            #(#doc_attrs)*
             pub const #const_name: usize = #num_lit;
+        });
+
+        let fn_name = format_ident!("schedule_{}", pascal_to_snake(&variant.ident.to_string()));
+        let params = fields.iter().map(|(name, ty)| quote! { #name: #ty });
+        let mut tuple_elems: Vec<TokenStream> = fields
+            .iter()
+            .map(|(name, ty)| {
+                if is_plain_usize(ty) {
+                    quote! { #name }
+                } else {
+                    quote! { (#name as usize) }
+                }
+            })
+            .collect();
+        tuple_elems.resize_with(3, || quote! { 0 });
+        let fn_doc = format!(" Schedules the `{}` upcall.", variant.ident);
+
+        fns.push(quote! {
+            #[doc = #fn_doc]
+            pub fn #fn_name(
+                upcalls: &kernel::grant::GrantKernelData<'_>,
+                #(#params),*
+            ) -> Result<(), kernel::upcall::UpcallError> {
+                upcalls.schedule_upcall(#const_name, (#(#tuple_elems),*))
+            }
         });
     }
 
-    Ok(quote! { #(#consts)* })
+    let count = Literal::u8_suffixed(seen.len() as u8);
+    consts.push(quote! {
+        #[doc = " The number of upcalls."]
+        pub const COUNT: u8 = #count;
+    });
+
+    Ok(quote! {
+        pub mod subscribe {
+            #(#consts)*
+            #(#fns)*
+        }
+    })
 }
