@@ -7,3 +7,4 @@ edition.workspace = true
 
 [dependencies]
 macros = { path = "macros" }
+kernel = { path = "kernel-mock" }
